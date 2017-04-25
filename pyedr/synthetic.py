@@ -1,8 +1,9 @@
 
 import numpy as np
+import numpy
+import scipy.integrate
 import matplotlib.pyplot as plt
 from fastcache import clru_cache
-from scipy.integrate import odeint
 from mpl_toolkits.mplot3d import Axes3D
 from collections import namedtuple, ChainMap
 
@@ -22,75 +23,18 @@ def random_walk(N, sampling_rate):
     return np.sr2sqdt(sampling_rate) * np.random.randn(N).cumsum()
 
 
-Signal = namedtuple("Signal", ["time", "input", "target"])
-
-class SignalGenerator:
-    """ Interface for Signal
-    """
-    def __init__(self, max_time=10, sampling_rate=10, seed=42):
-        self._sampling_rate = np.int64(sampling_rate)
-        self._time = np.linspace(0, max_time, max_time * self._sampling_rate)
-        self._max_time = max(self._time)
-        np.random.seed(seed)
-
-    def __call__(self):
-        """ generate the new Signal
-        """
-        raise NotImplementedError
-
-    def show_single_instance(self, signal = None):
-        if signal is None:
-            signal = self()
-        ax = plt.subplot(211)
-        plt.plot(signal.time, signal.input)
-        plt.subplot(212, sharex=ax)
-        plt.plot(signal.time, signal.target)
-        plt.xlabel("Time (sec.)")
-        plt.tight_layout()
-        plt.show()
+def get_respiratory_phase(num_samples, sampling_rate, frequency=15.0/60.0, stdev=1.0/60.0):
+    w  = 2.0 * np.pi * frequency
+    dw = 2.0 * np.pi * stdev
+    dt = 1.0/np.float64(sampling_rate)
+    sqdt = np.sqrt(dt)
+    time = dt * np.arange(num_samples)
+    phi_init = 2.0 * np.pi * np.random.rand() 
+    phase = phi_init + time*w + dw*sqdt*np.random.randn(num_samples).cumsum()
+    return phase
 
 
-class VanillaECGGenerator(SignalGenerator):
-    """ Prototype of a ECG signal generator providing essential parameters
-
-    example:
-        ECG().show_single_instance()
-    """
-
-    def __init__(self,
-                 heart_rate=60/60, respiration_rate=15/60,
-                 respiration_rate_stdev = 1/60,
-                 respiration_fluctuations=1/60,
-                 esk_strength=0.1, rsa_strength=0.5, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._heart_rate = heart_rate
-        self._respiration_rate = respiration_rate
-        self._respiration_fluctuations = respiration_fluctuations
-        self._respiration_rate_stdev = respiration_rate_stdev
-        self._rsa_strength = rsa_strength
-        self._esk_strength = esk_strength
-
-
-
-class Respiration:
-
-    def __init__(self, ensemble_mean_period_duration, stdev_period_duration):
-        mean_period_duration = np.random.normal(ensemble_mean_period_duration, stdev_period_duration)
-        period_durations = np.random.normal( mean_period_duration, stdev_period_duration, 1000)
-        self._respiration_start_times = np.concatenate([[0], period_durations.cumsum()])
-
-    def __call__(self, time):
-        time = time  +  100
-        idx = np.searchsorted(self._respiration_start_times, time)
-        period_duration = (self._respiration_start_times[idx] -
-                           self._respiration_start_times[idx - 1])
-        phase = (time - self._respiration_start_times[idx - 1]) / period_duration
-        phase = phase % 1
-        return np.exp(-(phase - 0.5)**2 / (2 * 0.03))
-
-
-
-class SyntheticECGGenerator(VanillaECGGenerator):
+class SyntheticECGGenerator:
     """ Generate synthetic ECG Signals
 
     >>> get_signal = synthetic.SyntheticECG()
@@ -123,13 +67,25 @@ class SyntheticECGGenerator(VanillaECGGenerator):
             than it acts everywhere except in the spot centered at the R-peak 
             with the given width (see also show_single_trajectory)
     """
-    default_params = {
+    defaults = {
         'sampling_rate': 250,
         'heart_noise_strength': 0.05,
         'respiration_noise_strength': 0.05,
         'esk_spot_width': 0.15,
-        'rsa_spot_width': 0.25
+        'rsa_spot_width': 0.25,
+        'heart_rate_fluctuations': 0.1,
+        'heart_rate': 60.0/60.0,
+        'respiration_rate': 15.0/60.0,
+        'respiration_rate_stdev': 1/60,
+        'respiration_fluctuation': 1/60,
+        'esk_strength': 0.1,
+        'rsa_strength': 0.5,
+        'num_samples': 1024,
+        'seed': 42
     }
+
+    Signal = namedtuple("Signal", ["time", "input", "target"])
+    State = namedtuple("EKGState", "theta z")
 
     WaveParameter = namedtuple("Parameter", "a b theta")
     WAVE_PARAMETERS = {
@@ -145,67 +101,45 @@ class SyntheticECGGenerator(VanillaECGGenerator):
     RSA_SPOT_WIDTH_QRS = 2 * np.pi / 3
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__dict__.update(**ChainMap(kwargs, self.default_params))
+        self.__dict__.update(**ChainMap(kwargs, self.defaults))
+
+        np.random.seed(self.seed)
+        self.omega_heart_mean = 2.0 * np.pi * self.heart_rate
+
 
     def _random_process(self, coefficients, time):
-        #TODO(dv): ideally this should be a Ornstein-Uhlenbeck process, 
-        #          how is its spectral decomposition?
-        return sum(c * np.sin((k + 1) * np.pi * time / self._max_time / 2) / (k + 1) 
+        """TODO(dv): ideally this should be a Ornstein-Uhlenbeck process, 
+                  how is its spectral decomposition?
+        """
+        return sum(c * np.sin((k + 1) * np.pi * time / self.max_time / 2) / (k + 1) 
                    for k, c in enumerate(coefficients)) / np.pi
 
-    def _dynamical_equation_of_motion(self, state, time, respiration,
-                                      random_coefficients):
-        x, y, z = state
-
-        alpha = 1 - np.sqrt(x**2 + y**2)
-        theta = np.arctan2(y, x)
-        r = respiration(time)
-        omega_heart_mean = 2 * np.pi * self._heart_rate
-        omega_heart = omega_heart_mean * (1 + 
-            self._heart_rate_fluctuations * self._random_process(
-                random_coefficients, time))
-        omega_heart = max(omega_heart, 0)
-        if self._rsa_spot_width is None:
-            omega_heart = omega_heart * (1 + self._rsa_strength * r)
-        else:
-            omega_heart = (omega_heart * 
-             (1 + (1 - np.exp(- theta**2 / self._rsa_spot_width**2)) *  
-                   self._rsa_strength * r))
-        
-        x_dot = alpha * x - omega_heart * y
-        y_dot = alpha * y + omega_heart * x
-
-        z_dot = -z + self.A * r
+    def derivs(self, state, resp_state):
+        theta, EKG = state
+        tht_dot = self.omega_heart_mean + self.rsa_strength * (1.0 + np.cos(theta)) * resp_state
+        z_dot = -EKG + self.A * resp_state
         for a_i, b_i, theta_i in self.WAVE_PARAMETERS.values():
             delta_theta = (theta - theta_i + np.pi) % (2 * np.pi) - np.pi
-            z_dot += -(omega_heart / omega_heart_mean * a_i * delta_theta *
-                       np.exp(-delta_theta**2 / (2 * b_i**2)))
+            z_dot += -a_i * delta_theta * np.exp(-delta_theta**2 / (2 * b_i**2))
 
-        return [x_dot, y_dot, z_dot]
+        return np.array([tht_dot, z_dot])
 
     def show_single_trajectory(self, show=False):
-        null_resp = lambda x: np.zeros_like(x)
-        trajectory = self._heartbeat_trajectory(respiration=null_resp)
+        trajectory = self._heartbeat_trajectory(num_samples=1024)
         fig = plt.figure()
         ax = fig.gca(projection='3d')
-        theta = self._time
-        x = trajectory[:, 0]
-        y = trajectory[:, 1]
-        z = trajectory[:, 2]
-        theta = np.arctan2(y, x)
-        z2 = np.exp(- theta**2 / self._esk_spot_width**2)
+        tht = trajectory[:, 0]
+        z   = trajectory[:, 1]
+        x, y = np.sin(tht), np.cos(tht)
         ax.plot(x, y, z)
-        ax.plot(x, y, z2 / 10)
         if show: plt.show()
 
     @staticmethod
     def _noise(signal, stdev):
         signal += np.random.normal(0, stdev, len(signal))
 
-    def _respiration(self):
-        return Respiration(1 / self._respiration_rate,
-                           self._respiration_rate_stdev / self._respiration_rate**2)
+    def get_resp_phase(self, num_samples):
+        return get_respiratory_phase(self.num_samples, self.sampling_rate, self.respiration_rate, self.respiration_rate_stdev)
 
     def _coupled_via_esk(self, heartbeat_trajectory, respiration):
         heartbeat = heartbeat_trajectory[:, 2]
@@ -215,33 +149,29 @@ class SyntheticECGGenerator(VanillaECGGenerator):
             x = heartbeat_trajectory[:, 0]
             y = heartbeat_trajectory[:, 1]
             theta = np.arctan2(y, x)
-            heartbeat[:] *= (1 + np.exp(- theta**2 / self._esk_spot_width**2) * 
+            heartbeat[:] *= (1 + np.exp(- theta**2 / self.esk_spot_width**2) * 
                                  self._esk_strength * respiration)
 
     def _heartbeat(self, respiration):
-        return self._heartbeat_trajectory(respiration)[:, 2]
+        return self._heartbeat_trajectory(respiration)[:, 1]
 
-    def _heartbeat_trajectory(self, respiration):
-        random_coefficients = np.random.normal(size=30)
-        trajectory = odeint(
-            self._dynamical_equation_of_motion,
-            [-1, 0, 0], np.concatenate([np.linspace(-5, -0.1, 10), self._time]),
-            (respiration, random_coefficients))[10:]
-        trajectory[:, 2] *= 20
+    def _heartbeat_trajectory(self, num_samples):
+        dt = 1./np.float64(self.sampling_rate)
+        derivs = self.derivs
+        resp_phase = self.get_resp_phase(num_samples)
+        resp_states = np.cos(resp_phase)
+        trajectory = np.zeros((num_samples, 2), np.float64)
+        for n in range(1, num_samples):
+            trajectory[n] = trajectory[n-1] + dt * derivs(trajectory[n-1], resp_states[n-1])
+        trajectory[:, 1] *= 20
+        #np.vstack((trajectory, resp_states[None,:]))
         return trajectory
 
     def __call__(self):
-        respiration_t =  self._respiration()
-        respiration = respiration_t(self._time)
-        heartbeat_trajectory = self._heartbeat_trajectory(respiration_t)
-        heartbeat = heartbeat_trajectory[:, 2]
+        heartbeat_trajectory = self._heartbeat_trajectory(self.num_samples)
+        heartbeat = heartbeat_trajectory[:, 1]
+        respiration = heartbeat_trajectory[:, 2]
         self._coupled_via_esk(heartbeat_trajectory, respiration)
         self._noise(heartbeat, self._heart_noise_stength)
         self._noise(respiration, self._respiration_noise_stength)
-        return Signal(time=self._time, input=heartbeat, target=respiration)
-
-
-
-if __name__ == "__main__":
-    get_signal = SyntheticECGGenerator(sampling_rate=250, max_time=10)
-    get_signal.show_single_instance()
+        return self.Signal(time=self.time, input=heartbeat, target=respiration)
