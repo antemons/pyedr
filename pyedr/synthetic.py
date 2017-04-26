@@ -81,7 +81,7 @@ class SyntheticECGGenerator:
         "T": WaveParameter(a= 5.5, b=.3,  theta=np.pi/2,   esk_factor= .0)
     }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **kwargs):
         self.__dict__.update(**ChainMap(kwargs, self.defaults))
         np.random.seed(self.seed)
         self.omega_heart_mean = pi2 * self.heart_rate
@@ -163,8 +163,8 @@ class SyntheticECGGenerator:
         heartbeat_trajectory = self._heartbeat_trajectory()
         EKG  = heartbeat_trajectory[:, 1]
         RESP = heartbeat_trajectory[:, 2]
-        self._noise(EKG, self._heart_noise_stength)
-        self._noise(RESP, self._respiration_noise_stength)
+        self._noise(EKG, self.heart_noise_strength)
+        self._noise(RESP, self.respiration_noise_strength)
         return self.Signal(input=EKG, target=RESP)
 
 
