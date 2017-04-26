@@ -1,36 +1,19 @@
 
 import numpy as np
-import numpy
-import scipy.integrate
-import matplotlib.pyplot as plt
-from fastcache import clru_cache
-from mpl_toolkits.mplot3d import Axes3D
 from collections import namedtuple, ChainMap
 
-@clru_cache(maxsize=256)
-def sr2sqdt(sampling_rate):
-    return np.sqrt(1.0/np.float64(sampling_rate))
+pi2 = 2*np.pi
 
 __all__ = ['SyntheticECG']
 
-def random_walk(N, sampling_rate):
-    """ generate random walk
-    Args:
-        time (array): times (must be equidistant a la np.linspace)
-    Returns:
-        array of len like time
-    """
-    return np.sr2sqdt(sampling_rate) * np.random.randn(N).cumsum()
-
-
 def get_respiratory_phase(num_samples, sampling_rate, frequency=15.0/60.0, stdev=1.0/60.0):
-    w  = 2.0 * np.pi * frequency
-    dw = 2.0 * np.pi * stdev
-    dt = 1.0/np.float64(sampling_rate)
+    w  = pi2 * frequency
+    dw = pi2 * stdev
+    dt = 1/np.float64(sampling_rate)
     sqdt = np.sqrt(dt)
-    time = dt * np.arange(num_samples)
-    phi_init = 2.0 * np.pi * np.random.rand() 
-    phase = phi_init + time*w + dw*sqdt*np.random.randn(num_samples).cumsum()
+    t = dt * np.arange(num_samples)
+    phi_init = pi2 * np.random.rand() 
+    phase = phi_init + t*w + dw*sqdt*np.random.randn(num_samples).cumsum()
     return phase
 
 
@@ -68,6 +51,7 @@ class SyntheticECGGenerator:
             with the given width (see also show_single_trajectory)
     """
     defaults = {
+        'settling_time': 5.0,
         'sampling_rate': 250,
         'heart_noise_strength': 0.05,
         'respiration_noise_strength': 0.05,
@@ -80,58 +64,73 @@ class SyntheticECGGenerator:
         'respiration_fluctuation': 1/60,
         'esk_strength': 0.1,
         'rsa_strength': 0.5,
+        'rsa_width_shift': 0.0,
+        'rsa_dispersion': 0.1,
         'num_samples': 1024,
         'seed': 42
     }
 
-    Signal = namedtuple("Signal", ["time", "input", "target"])
-    State = namedtuple("EKGState", "theta z")
+    Signal = namedtuple("SyntheticEKG", ["input", "target"])
 
-    WaveParameter = namedtuple("Parameter", "a b theta")
+    WaveParameter = namedtuple("Parameter", "a b theta esk_factor")
     WAVE_PARAMETERS = {
-        "P": WaveParameter(a=1.2,  b=.25, theta=-np.pi/3),
-        "Q": WaveParameter(a=-5.0, b=.1,  theta=-np.pi/12),
-        "R": WaveParameter(a=30.0, b=.1,  theta=0),
-        "S": WaveParameter(a=-7.5, b=.1,  theta=np.pi/12),
-        "T": WaveParameter(a=.75,  b=.4,  theta=np.pi/2)
+        "P": WaveParameter(a= 2.0, b=.25, theta=-np.pi/3,  esk_factor= .0),
+        "Q": WaveParameter(a=-2.0, b=.1,  theta=-np.pi/12, esk_factor= .0),
+        "R": WaveParameter(a=30.0, b=.1,  theta=0,         esk_factor= .2),
+        "S": WaveParameter(a=-3.5, b=.1,  theta=np.pi/12,  esk_factor=-.1),
+        "T": WaveParameter(a= 5.5, b=.3,  theta=np.pi/2,   esk_factor= .0)
     }
-
-    A = 0.0
-    ESK_SPOT_WIDTH_QRS = 2 * np.pi / 12
-    RSA_SPOT_WIDTH_QRS = 2 * np.pi / 3
 
     def __init__(self, *args, **kwargs):
         self.__dict__.update(**ChainMap(kwargs, self.defaults))
-
         np.random.seed(self.seed)
-        self.omega_heart_mean = 2.0 * np.pi * self.heart_rate
+        self.omega_heart_mean = pi2 * self.heart_rate
 
-
-    def _random_process(self, coefficients, time):
-        """TODO(dv): ideally this should be a Ornstein-Uhlenbeck process, 
-                  how is its spectral decomposition?
+    def phase_deriv(self, theta, resp_state):
+        """Derivative of the heartbeat phase
+        Args:
+            theta: heartbeat phase
+            resp_state: state of the respiratory cycle (-1, 1).
+                Negative values decelerate, and positive values
+                accelerate the heart beat.
+        General form:
+            tht' = w + Q(tht, R)
+            where R is the respiratory oscillation.
+        Coupling function Q
+            Q(tht, R) = strength R(t) / (1+exp((cos(tht)+shift)/width))
         """
-        return sum(c * np.sin((k + 1) * np.pi * time / self.max_time / 2) / (k + 1) 
-                   for k, c in enumerate(coefficients)) / np.pi
+        return self.omega_heart_mean + self.rsa_strength/(1+np.exp((np.cos(theta)+self.rsa_width_shift)/self.rsa_dispersion)) * resp_state
 
-    def derivs(self, state, resp_state):
-        theta, EKG = state
-        tht_dot = self.omega_heart_mean + self.rsa_strength * (1.0 + np.cos(theta)) * resp_state
-        z_dot = -EKG + self.A * resp_state
-        for a_i, b_i, theta_i in self.WAVE_PARAMETERS.values():
-            delta_theta = (theta - theta_i + np.pi) % (2 * np.pi) - np.pi
-            z_dot += -a_i * delta_theta * np.exp(-delta_theta**2 / (2 * b_i**2))
+    def EKG_from_phase(self, phase, RESP=None):
+        """Computes EKG from a heartbeat phase timeseries
+        Args:
+            phase: numpy.ndarray, heartbeat phase.
+            RESP: numpy.ndarray, respiratory oscillation in (-1, 1).
 
-        return np.array([tht_dot, z_dot])
+        RESP modulates the amplitude of each EKG wave with an absolute
+        strength self.esk_strength, and a wave-specific contribution esk_factor.
+        """
+        if RESP is None:
+            RESP = np.zeros_like(phase, dtype=np.float64)
+        else:
+            assert phase.size == RESP.size
+        EKG = np.zeros_like(phase, dtype=np.float64)
+        for a_i, b_i, theta_i, esk_fac in self.WAVE_PARAMETERS.values():
+            dtht = phase-theta_i
+            EKG += (1+self.esk_strength*esk_fac*RESP)*a_i * np.exp((np.cos(dtht)-1) / (2*b_i**2))
+        return EKG
 
     def show_single_trajectory(self, show=False):
-        trajectory = self._heartbeat_trajectory(num_samples=1024)
-        fig = plt.figure()
-        ax = fig.gca(projection='3d')
-        tht = trajectory[:, 0]
-        z   = trajectory[:, 1]
-        x, y = np.sin(tht), np.cos(tht)
-        ax.plot(x, y, z)
+        import matplotlib.pyplot as plt
+        trajectory = self._heartbeat_trajectory()
+        heart_phase  = trajectory[:, 0]
+        EKG  = trajectory[:, 1]
+        RESP = trajectory[:, 2]
+        fig = plt.figure(figsize=(10, 6))
+        ax = plt.subplot(211)
+        plt.plot(EKG)
+        plt.subplot(212, sharex=ax)
+        plt.plot(RESP)
         if show: plt.show()
 
     @staticmethod
@@ -139,39 +138,36 @@ class SyntheticECGGenerator:
         signal += np.random.normal(0, stdev, len(signal))
 
     def get_resp_phase(self, num_samples):
-        return get_respiratory_phase(self.num_samples, self.sampling_rate, self.respiration_rate, self.respiration_rate_stdev)
+        return get_respiratory_phase(num_samples, self.sampling_rate, self.respiration_rate, self.respiration_rate_stdev)
 
-    def _coupled_via_esk(self, heartbeat_trajectory, respiration):
-        heartbeat = heartbeat_trajectory[:, 2]
-        if self.esk_spot_width is None:
-            heartbeat[:] = heartbeat * (1 + self._esk_strength * respiration)
-        else:
-            x = heartbeat_trajectory[:, 0]
-            y = heartbeat_trajectory[:, 1]
-            theta = np.arctan2(y, x)
-            heartbeat[:] *= (1 + np.exp(- theta**2 / self.esk_spot_width**2) * 
-                                 self._esk_strength * respiration)
+    def _heartbeat(self):
+        return self._heartbeat_trajectory()[:, 1]
 
-    def _heartbeat(self, respiration):
-        return self._heartbeat_trajectory(respiration)[:, 1]
-
-    def _heartbeat_trajectory(self, num_samples):
-        dt = 1./np.float64(self.sampling_rate)
-        derivs = self.derivs
-        resp_phase = self.get_resp_phase(num_samples)
+    def _heartbeat_trajectory(self):
+        dt    = 1./np.float64(self.sampling_rate)
+        deriv = self.phase_deriv
+        num_pre = int(self.settling_time*self.sampling_rate)
+        num_int = num_pre + self.num_samples
+        initial_state = 2.0*np.pi*np.random.rand()
+        resp_phase = self.get_resp_phase(num_int)
         resp_states = np.cos(resp_phase)
-        trajectory = np.zeros((num_samples, 2), np.float64)
-        for n in range(1, num_samples):
-            trajectory[n] = trajectory[n-1] + dt * derivs(trajectory[n-1], resp_states[n-1])
-        trajectory[:, 1] *= 20
-        #np.vstack((trajectory, resp_states[None,:]))
-        return trajectory
+        heart_phase = np.zeros((num_int), np.float64)
+        heart_phase[0] = np.array(initial_state)
+        for n in range(1, num_int):
+            heart_phase[n] = heart_phase[n-1] + dt * deriv(heart_phase[n-1], resp_states[n-1])
+        EKG  = self.EKG_from_phase(heart_phase, resp_states)
+        trajectory = np.transpose(np.vstack((heart_phase, EKG, resp_states)))
+        return trajectory[num_pre:]
 
     def __call__(self):
-        heartbeat_trajectory = self._heartbeat_trajectory(self.num_samples)
-        heartbeat = heartbeat_trajectory[:, 1]
-        respiration = heartbeat_trajectory[:, 2]
-        self._coupled_via_esk(heartbeat_trajectory, respiration)
-        self._noise(heartbeat, self._heart_noise_stength)
-        self._noise(respiration, self._respiration_noise_stength)
-        return self.Signal(time=self.time, input=heartbeat, target=respiration)
+        heartbeat_trajectory = self._heartbeat_trajectory()
+        EKG  = heartbeat_trajectory[:, 1]
+        RESP = heartbeat_trajectory[:, 2]
+        self._noise(EKG, self._heart_noise_stength)
+        self._noise(RESP, self._respiration_noise_stength)
+        return self.Signal(input=EKG, target=RESP)
+
+
+if __name__ == "__main__":
+    gen = SyntheticECGGenerator(sampling_rate=250, num_samples=N, rsa_strength=1)
+    gen.show_single_trajectory(show=True)
