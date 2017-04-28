@@ -1,5 +1,6 @@
 
 import numpy as np
+from numpy.random import normal
 from collections import namedtuple, ChainMap
 
 pi2 = 2*np.pi
@@ -20,11 +21,6 @@ def get_respiratory_phase(num_samples, sampling_rate, frequency=15.0/60.0, stdev
     phase = phi_init + t*w + dw*sqdt*np.random.randn(num_samples).cumsum()
     return phase
 
-def gaussian(x, sigma):
-    if sigma:
-        return np.random.normal(x, sigma)
-    else:
-        return x
 
 class SyntheticECGGenerator:
     """ Generate synthetic ECG Signals
@@ -52,21 +48,13 @@ class SyntheticECGGenerator:
         heart_rate_fluctuations: relative heat rate fluctuations (default 0.05)
         respiration_noise_stength: noise added to respiration signal
             (default 0.05)
-        #esk_spot_width (None or float): if None then the esk acts uniform if float
-        #    than only in a spot centered at the R-peak with the given width
-        #    (see also show_single_trajectory)
-        #rsa_spot_width (None or float): if None then the esk acts uniform if float
-        #    than it acts everywhere except in the spot centered at the R-peak 
-        #    with the given width (see also show_single_trajectory)
     """
     defaults = {
         'settling_time': 5.0,
         'sampling_rate': 250,
         'heart_noise_strength': 0.05,
-        'heart_fluctuation_stenth': 1,  # is relative
+        'heart_fluctuation_strength': 1,  # is relative
         'respiration_noise_strength': 0.05,
-        #'esk_spot_width': 0.15,
-        #'rsa_spot_width': 0.25,
         'heart_rate_fluctuations': 0.1,
         'heart_rate': 60.0/60.0,
         'respiration_rate': 15.0/60.0,
@@ -130,22 +118,20 @@ class SyntheticECGGenerator:
         """
         if RESP is None:
             RESP = np.zeros_like(phase, dtype=np.float64)
-        else:
-            assert phase.size == RESP.size
+        assert phase.size == RESP.size
         EKG = np.zeros_like(phase, dtype=np.float64)
         for peak_idx in range(int(min(phase) / pi2) - 10, int(max(phase) / pi2) + 10):
-            for a_i, b_i, theta_i, esk_fac, a_sigma, b_sigma, theta_sigma in self.WAVE_PARAMETERS.values():
-                a = gaussian(a_i, self.heart_fluctuation_stenth * a_sigma)
-                b = gaussian(b_i, self.heart_fluctuation_stenth * b_sigma)
-                theta = gaussian(theta_i, self.heart_fluctuation_stenth * theta_sigma)
-                delta_theta = phase - theta - peak_idx * pi2
-                #EKG += (1+self.esk_strength*esk_fac*RESP)*a_i * np.exp((np.cos(dtht)-1) / (2*b_i**2))
-                EKG += (1+self.esk_strength*esk_fac*RESP) * a * np.exp(-delta_theta**2 / (2*b**2))
+            for a_i, b_i, tht_i, esk_fac, a_sigma, b_sigma, theta_sigma in self.WAVE_PARAMETERS.values():
+                a   = normal(a_i,   self.heart_fluctuation_strength * a_sigma)
+                b   = normal(b_i,   self.heart_fluctuation_strength * b_sigma)
+                tht = normal(tht_i, self.heart_fluctuation_strength * theta_sigma)
+                dtht = phase - tht - peak_idx * pi2
+                EKG += (1+self.esk_strength*esk_fac*RESP) * a * np.exp(-dtht**2 / (2*b**2))
         return EKG
 
     def show_single_trajectory(self, show=False):
         import matplotlib.pyplot as plt
-        trajectory = self._heartbeat_trajectory()
+        trajectory = self.heartbeat_trajectory()
         heart_phase  = trajectory[:, 0]
         EKG  = trajectory[:, 1]
         RESP = trajectory[:, 2]
@@ -156,17 +142,10 @@ class SyntheticECGGenerator:
         plt.plot(RESP)
         if show: plt.show()
 
-    @staticmethod
-    def _noise(signal, stdev):
-        signal += np.random.normal(0, stdev, len(signal))
-
     def get_resp_phase(self, num_samples):
         return get_respiratory_phase(num_samples, self.sampling_rate, self.respiration_rate, self.respiration_rate_stdev)
 
-    def _heartbeat(self):
-        return self._heartbeat_trajectory()[:, 1]
-
-    def _heartbeat_trajectory(self):
+    def heartbeat_trajectory(self):
         dt    = 1./np.float64(self.sampling_rate)
         deriv = self.phase_deriv
         num_pre = int(self.settling_time*self.sampling_rate)
@@ -183,14 +162,15 @@ class SyntheticECGGenerator:
         return trajectory[num_pre:]
 
     def __call__(self):
-        heartbeat_trajectory = self._heartbeat_trajectory()
+        heartbeat_trajectory = self.heartbeat_trajectory()
         EKG  = heartbeat_trajectory[:, 1]
         RESP = heartbeat_trajectory[:, 2]
-        self._noise(EKG, self.heart_noise_strength)
-        self._noise(RESP, self.respiration_noise_strength)
+        EKG  += normal(0.0, self.heart_noise_strength,       size=EKG.size)
+        RESP += normal(0.0, self.respiration_noise_strength, size=RESP.size)
         return self.Signal(input=EKG, target=RESP)
 
 
 if __name__ == "__main__":
+    N = 20 * 250
     gen = SyntheticECGGenerator(sampling_rate=250, num_samples=N, rsa_strength=1)
     gen.show_single_trajectory(show=True)
