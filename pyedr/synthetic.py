@@ -7,6 +7,10 @@ pi2 = 2*np.pi
 __all__ = ['SyntheticECG']
 
 def get_respiratory_phase(num_samples, sampling_rate, frequency=15.0/60.0, stdev=1.0/60.0):
+    """ 
+    Returns:
+        array[num_samples]: the phase (as func of time)
+    """
     w  = pi2 * frequency
     dw = pi2 * stdev
     dt = 1/np.float64(sampling_rate)
@@ -16,6 +20,11 @@ def get_respiratory_phase(num_samples, sampling_rate, frequency=15.0/60.0, stdev
     phase = phi_init + t*w + dw*sqdt*np.random.randn(num_samples).cumsum()
     return phase
 
+def gaussian(x, sigma):
+    if sigma:
+        return np.random.normal(x, sigma)
+    else:
+        return x
 
 class SyntheticECGGenerator:
     """ Generate synthetic ECG Signals
@@ -43,20 +52,21 @@ class SyntheticECGGenerator:
         heart_rate_fluctuations: relative heat rate fluctuations (default 0.05)
         respiration_noise_stength: noise added to respiration signal
             (default 0.05)
-        esk_spot_width (None or float): if None then the esk acts uniform if float
-            than only in a spot centered at the R-peak with the given width
-            (see also show_single_trajectory)
-        rsa_spot_width (None or float): if None then the esk acts uniform if float
-            than it acts everywhere except in the spot centered at the R-peak 
-            with the given width (see also show_single_trajectory)
+        #esk_spot_width (None or float): if None then the esk acts uniform if float
+        #    than only in a spot centered at the R-peak with the given width
+        #    (see also show_single_trajectory)
+        #rsa_spot_width (None or float): if None then the esk acts uniform if float
+        #    than it acts everywhere except in the spot centered at the R-peak 
+        #    with the given width (see also show_single_trajectory)
     """
     defaults = {
         'settling_time': 5.0,
         'sampling_rate': 250,
         'heart_noise_strength': 0.05,
+        'heart_fluctuation_stenth': 1,  # is relative
         'respiration_noise_strength': 0.05,
-        'esk_spot_width': 0.15,
-        'rsa_spot_width': 0.25,
+        #'esk_spot_width': 0.15,
+        #'rsa_spot_width': 0.25,
         'heart_rate_fluctuations': 0.1,
         'heart_rate': 60.0/60.0,
         'respiration_rate': 15.0/60.0,
@@ -67,18 +77,25 @@ class SyntheticECGGenerator:
         'rsa_width_shift': 0.0,
         'rsa_dispersion': 0.1,
         'num_samples': 1024,
-        'seed': 42
+        'seed': None
     }
 
     Signal = namedtuple("SyntheticEKG", ["input", "target"])
 
-    WaveParameter = namedtuple("Parameter", "a b theta esk_factor")
+    WaveParameter = namedtuple(
+        "Parameter", ["a", "b", "theta", "esk_factor", 
+                      "a_sigma", "b_sigma", "theta_sigma"])
     WAVE_PARAMETERS = {
-        "P": WaveParameter(a= 2.0, b=.25, theta=-np.pi/3,  esk_factor= .0),
-        "Q": WaveParameter(a=-2.0, b=.1,  theta=-np.pi/12, esk_factor= .0),
-        "R": WaveParameter(a=30.0, b=.1,  theta=0,         esk_factor= .2),
-        "S": WaveParameter(a=-3.5, b=.1,  theta=np.pi/12,  esk_factor=-.1),
-        "T": WaveParameter(a= 5.5, b=.3,  theta=np.pi/2,   esk_factor= .0)
+        "P": WaveParameter(a= .20, b=.25, theta=-np.pi/3,  esk_factor= .0,
+                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0),
+        "Q": WaveParameter(a=-.20, b=.1,  theta=-np.pi/12, esk_factor= .0,
+                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0),
+        "R": WaveParameter(a=3.00, b=.1,  theta=0,         esk_factor= .2,
+                           a_sigma=.10, b_sigma=0.02, theta_sigma=0),
+        "S": WaveParameter(a=-.35, b=.1,  theta=np.pi/12,  esk_factor=-.1,
+                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0),
+        "T": WaveParameter(a= .55, b=.3,  theta=np.pi/2,   esk_factor= .0,
+                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0)
     }
 
     def __init__(self, **kwargs):
@@ -99,7 +116,8 @@ class SyntheticECGGenerator:
         Coupling function Q
             Q(tht, R) = strength R(t) / (1+exp((cos(tht)+shift)/width))
         """
-        return self.omega_heart_mean + self.rsa_strength/(1+np.exp((np.cos(theta)+self.rsa_width_shift)/self.rsa_dispersion)) * resp_state
+        Q = self.rsa_strength/(1+np.exp((np.cos(theta)+self.rsa_width_shift)/self.rsa_dispersion)) * resp_state
+        return self.omega_heart_mean + Q
 
     def EKG_from_phase(self, phase, RESP=None):
         """Computes EKG from a heartbeat phase timeseries
@@ -115,9 +133,14 @@ class SyntheticECGGenerator:
         else:
             assert phase.size == RESP.size
         EKG = np.zeros_like(phase, dtype=np.float64)
-        for a_i, b_i, theta_i, esk_fac in self.WAVE_PARAMETERS.values():
-            dtht = phase-theta_i
-            EKG += (1+self.esk_strength*esk_fac*RESP)*a_i * np.exp((np.cos(dtht)-1) / (2*b_i**2))
+        for peak_idx in range(int(min(phase) / pi2) - 10, int(max(phase) / pi2) + 10):
+            for a_i, b_i, theta_i, esk_fac, a_sigma, b_sigma, theta_sigma in self.WAVE_PARAMETERS.values():
+                a = gaussian(a_i, self.heart_fluctuation_stenth * a_sigma)
+                b = gaussian(b_i, self.heart_fluctuation_stenth * b_sigma)
+                theta = gaussian(theta_i, self.heart_fluctuation_stenth * theta_sigma)
+                delta_theta = phase - theta - peak_idx * pi2
+                #EKG += (1+self.esk_strength*esk_fac*RESP)*a_i * np.exp((np.cos(dtht)-1) / (2*b_i**2))
+                EKG += (1+self.esk_strength*esk_fac*RESP) * a * np.exp(-delta_theta**2 / (2*b**2))
         return EKG
 
     def show_single_trajectory(self, show=False):
