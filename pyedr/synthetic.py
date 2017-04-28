@@ -1,6 +1,7 @@
 
 import numpy as np
 from numpy.random import normal
+from namedlist import namedlist
 from collections import namedtuple, ChainMap
 
 pi2 = 2*np.pi
@@ -70,26 +71,34 @@ class SyntheticECGGenerator:
 
     Signal = namedtuple("SyntheticEKG", ["input", "target"])
 
-    WaveParameter = namedtuple(
-        "Parameter", ["a", "b", "theta", "esk_factor", 
-                      "a_sigma", "b_sigma", "theta_sigma"])
+    WaveParameter = namedlist(
+        "Parameter", ["a", "b", "theta", "esk", 
+                      "da", "db", "dtheta"])
     WAVE_PARAMETERS = {
-        "P": WaveParameter(a= .20, b=.25, theta=-np.pi/3,  esk_factor= .0,
-                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0),
-        "Q": WaveParameter(a=-.20, b=.1,  theta=-np.pi/12, esk_factor= .0,
-                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0),
-        "R": WaveParameter(a=3.00, b=.1,  theta=0,         esk_factor= .2,
-                           a_sigma=.10, b_sigma=0.02, theta_sigma=0),
-        "S": WaveParameter(a=-.35, b=.1,  theta=np.pi/12,  esk_factor=-.1,
-                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0),
-        "T": WaveParameter(a= .55, b=.3,  theta=np.pi/2,   esk_factor= .0,
-                           a_sigma=0.01, b_sigma=0.02, theta_sigma=0)
+        "P": WaveParameter(a= .20, b=.25, theta=-np.pi/3,  esk= .0,
+                           da=0.01, db=0.02, dtheta=0),
+        "Q": WaveParameter(a=-.20, b=.1,  theta=-np.pi/12, esk= .0,
+                           da=0.01, db=0.02, dtheta=0),
+        "R": WaveParameter(a=3.00, b=.1,  theta=0,         esk= .2,
+                           da=.10, db=0.02, dtheta=0),
+        "S": WaveParameter(a=-.35, b=.1,  theta=np.pi/12,  esk=-.1,
+                           da=0.01, db=0.02, dtheta=0),
+        "T": WaveParameter(a= .55, b=.3,  theta=np.pi/2,   esk= .0,
+                           da=0.01, db=0.02, dtheta=0)
     }
 
     def __init__(self, **kwargs):
         self.__dict__.update(**ChainMap(kwargs, self.defaults))
         np.random.seed(self.seed)
         self.omega_heart_mean = pi2 * self.heart_rate
+        for k, v in kwargs.items():
+            w_tuple = k.split('_')
+            if w_tuple[0] in self.WAVE_PARAMETERS:
+                wname, pname = w_tuple
+                self.set_wave_param(wname, pname, v)
+
+    def set_wave_param(self, wave_name, param_name, val):
+        setattr(self.WAVE_PARAMETERS[wave_name], param_name, val)
 
     def phase_deriv(self, theta, resp_state):
         """Derivative of the heartbeat phase
@@ -114,19 +123,23 @@ class SyntheticECGGenerator:
             RESP: numpy.ndarray, respiratory oscillation in (-1, 1).
 
         RESP modulates the amplitude of each EKG wave with an absolute
-        strength self.esk_strength, and a wave-specific contribution esk_factor.
+        strength self.esk_strength, and a wave-specific contribution esk.
         """
         if RESP is None:
             RESP = np.zeros_like(phase, dtype=np.float64)
         assert phase.size == RESP.size
+        # Local namespace is sometimes faster, often better readable
+        esk_strg  = self.esk_strength
+        wavep     = self.WAVE_PARAMETERS
+        fluc_strg = self.heart_fluctuation_strength
         EKG = np.zeros_like(phase, dtype=np.float64)
         for peak_idx in range(int(min(phase) / pi2) - 10, int(max(phase) / pi2) + 10):
-            for a_i, b_i, tht_i, esk_fac, a_sigma, b_sigma, theta_sigma in self.WAVE_PARAMETERS.values():
-                a   = normal(a_i,   self.heart_fluctuation_strength * a_sigma)
-                b   = normal(b_i,   self.heart_fluctuation_strength * b_sigma)
-                tht = normal(tht_i, self.heart_fluctuation_strength * theta_sigma)
+            for a_i, b_i, tht_i, esk, da, db, dtheta in iter(wavep.values()):
+                a   = normal(a_i,   fluc_strg * da)
+                b   = normal(b_i,   fluc_strg * db)
+                tht = normal(tht_i, fluc_strg * dtheta)
                 dtht = phase - tht - peak_idx * pi2
-                EKG += (1+self.esk_strength*esk_fac*RESP) * a * np.exp(-dtht**2 / (2*b**2))
+                EKG += (1+esk_strg*esk*RESP) * a * np.exp(-dtht**2 / (2*b**2))
         return EKG
 
     def show_single_trajectory(self, show=False):
