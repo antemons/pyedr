@@ -51,7 +51,6 @@ class SyntheticECGGenerator:
             (default 0.05)
     """
     defaults = {
-        'settling_time': 5.0,
         'sampling_rate': 250,
         'heart_noise_strength': 0.05,
         'heart_fluctuation_strength': 1,  # is relative
@@ -161,8 +160,7 @@ class SyntheticECGGenerator:
     def heartbeat_trajectory(self):
         dt    = 1./np.float64(self.sampling_rate)
         deriv = self.phase_deriv
-        num_pre = int(self.settling_time*self.sampling_rate)
-        num_int = num_pre + self.num_samples
+        num_int = self.num_samples
         initial_state = 2.0*np.pi*np.random.rand()
         resp_phase = self.get_resp_phase(num_int)
         resp_states = np.cos(resp_phase)
@@ -172,7 +170,7 @@ class SyntheticECGGenerator:
             heart_phase[n] = heart_phase[n-1] + dt * deriv(heart_phase[n-1], resp_states[n-1])
         EKG  = self.EKG_from_phase(heart_phase, resp_states)
         trajectory = np.transpose(np.vstack((heart_phase, EKG, resp_states)))
-        return trajectory[num_pre:]
+        return trajectory
 
     def __call__(self):
         heartbeat_trajectory = self.heartbeat_trajectory()
