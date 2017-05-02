@@ -15,7 +15,8 @@ def get_respiratory_phase(num_samples, sampling_rate, frequency=15.0/60.0, stdev
         array[num_samples]: the phase (as func of time)
     """
     w  = pi2 * frequency
-    dw = w * stdev_factor
+    # Use sqrt to properly rescale Gaussian process.
+    dw = np.sqrt(w * stdev_factor)
     dt = 1/np.float64(sampling_rate)
     sqdt = np.sqrt(dt)
     t = dt * np.arange(num_samples)
@@ -121,16 +122,17 @@ class SyntheticECGGenerator:
     def heart_rate(self, hr):
         self._heart_rate = hr
         self.w_heart  = pi2 * hr
-        self.dw_heart = self.w_heart * self.hr_stdev_factor
+        self.hr_stdev_factor = self._hr_stdev_factor
 
     @property
     def hr_stdev_factor(self):
         return self._hr_stdev_factor
 
     @hr_stdev_factor.setter
-    def hr_stdev_factor(self, dhr):
-        self._hr_stdev_factor = dhr
-        self.dw_heart = self.w_heart * dhr
+    def hr_stdev_factor(self, dhr_fac):
+        self._hr_stdev_factor = dhr_fac
+        # Use sqrt to properly rescale Gaussian process.
+        self.dw_heart = np.sqrt(self.w_heart * dhr_fac)
 
 
     def set_wave_param(self, wave_name, param_name, val):
