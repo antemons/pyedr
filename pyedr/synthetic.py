@@ -68,13 +68,7 @@ class SyntheticECGGenerator:
     WaveParameter = namedlist(
         "Parameter", ["a", "b", "theta", "esk", 
                       "da", "db", "dtheta"])
-    WAVE_PARAMETERS = {
-        "P": WaveParameter(a= .25, b=pi2*.04,  theta=-pi/3,  esk= .5, da=0.05, db=pi2*0.002, dtheta=pi2*0.03),
-        "Q": WaveParameter(a=-.20, b=pi2*.01,  theta=-pi/12, esk=-.5, da=0.02, db=pi2*0.001, dtheta=pi2*0.03),
-        "R": WaveParameter(a=2.20, b=pi2*.015, theta=0,      esk= .5, da=.15,  db=pi2*0.002, dtheta=pi2*0.03),
-        "S": WaveParameter(a=-.15, b=pi2*.01,  theta=pi/12,  esk=-.5, da=0.02, db=pi2*0.001, dtheta=pi2*0.03),
-        "T": WaveParameter(a= .60, b=pi2*.06,  theta=pi/1.7, esk= .5, da=0.1,  db=pi2*0.002, dtheta=pi2*0.03)
-    }
+    
 
     def __init__(self,
             sampling_rate=250,
@@ -106,6 +100,15 @@ class SyntheticECGGenerator:
         self.rsa_dispersion = rsa_dispersion
         self.num_samples = num_samples
         self.seed = seed
+        
+        self.WAVE_PARAMETERS = {
+            "P": self.WaveParameter(a= .25, b=pi2*.04,  theta=-pi/3,  esk= .5, da=0.05, db=pi2*0.002, dtheta=pi2*0.03),
+            "Q": self.WaveParameter(a=-.20, b=pi2*.01,  theta=-pi/12, esk=-.5, da=0.02, db=pi2*0.001, dtheta=pi2*0.03),
+            "R": self.WaveParameter(a=2.20, b=pi2*.015, theta=0,      esk= .5, da=.15,  db=pi2*0.002, dtheta=pi2*0.03),
+            "S": self.WaveParameter(a=-.15, b=pi2*.01,  theta=pi/12,  esk=-.5, da=0.02, db=pi2*0.001, dtheta=pi2*0.03),
+            "T": self.WaveParameter(a= .60, b=pi2*.06,  theta=pi/1.7, esk= .5, da=0.1,  db=pi2*0.002, dtheta=pi2*0.03)
+            }
+        
         for k, v in kwargs.items():
             wp_tuple = k.split('_')
             if wp_tuple[0] in self.WAVE_PARAMETERS:
