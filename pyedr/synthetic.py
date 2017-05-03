@@ -1,6 +1,5 @@
 
 import numpy as np
-from numpy.random import normal
 from namedlist import namedlist
 from collections import namedtuple, ChainMap
 
@@ -8,6 +7,12 @@ pi  = np.pi
 pi2 = 2*pi
 
 __all__ = ['SyntheticECG']
+
+def normal(mean, sigma, size=None):
+    if sigma:
+        return np.random.normal(mean, sigma, size)
+    else:
+        return mean * np.ones(size)
 
 def get_respiratory_phase(num_samples, sampling_rate, frequency=15.0/60.0, stdev_factor=0.05):
     """ 
