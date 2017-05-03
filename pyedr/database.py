@@ -178,8 +178,6 @@ class SyntheticSubject(SubjectPrototype):
         """
         data = []
         for i in range(self.num_of_segments):
-            print("generate synthetic ecg/respiration: {:3} / {:3}".format(
-                i, self.num_of_segments), end="\r", flush=True)
             ekg, resp = self.gen_signal()
             ekg  = self.normalize[normalize](ekg)
             resp = self.normalize[normalize](resp)

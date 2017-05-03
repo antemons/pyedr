@@ -106,13 +106,20 @@ class SyntheticECGGenerator:
         self.rsa_dispersion = rsa_dispersion
         self.num_samples = num_samples
         self.seed = seed
-
-        np.random.seed(self.seed)
         for k, v in kwargs.items():
             wp_tuple = k.split('_')
             if wp_tuple[0] in self.WAVE_PARAMETERS:
                 wname, pname = wp_tuple
                 self.set_wave_param(wname, pname, v)
+
+    @property
+    def seed(self):
+        return self._seed
+
+    @seed.setter
+    def seed(self, seed):
+        self._seed = seed
+        np.random.seed(seed)
 
     @property
     def heart_rate(self):
